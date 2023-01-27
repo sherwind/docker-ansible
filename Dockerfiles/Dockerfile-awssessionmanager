@@ -1,0 +1,75 @@
+ARG VERSION
+
+# --------------------------------------------------------------------------------------------------
+# Builder Image
+# --------------------------------------------------------------------------------------------------
+FROM cytopia/ansible:${VERSION}-aws as builder
+
+# Required tools for building Python packages
+RUN set -eux \
+	&& apk add --no-cache \
+		# build tools
+		coreutils \
+		g++ \
+		gcc \
+		make \
+		musl-dev \
+		openssl-dev \
+		python3-dev \
+		# misc tools
+		git \
+		zip \
+		# go tools
+		cargo \
+		go
+
+# session-manager-plugin (copied to final image)
+RUN set -eux \
+	&& if [ "$(uname -m)" = "aarch64" ]; then \
+		ARCH="arm64"; \
+	elif [ "$(uname -m)" = "x86_64" ]; then \
+		ARCH="amd64"; \
+	else \
+		fail; \
+	fi \
+	\
+	&& git clone https://github.com/aws/session-manager-plugin.git /tmp/session-manager-plugin \
+	&& cd /tmp/session-manager-plugin \
+	&& PLUGIN_VERSION="$( git tag --sort=-creatordate \
+		| sort -V \
+		| grep -E '[0-9]+\.[0-9]+\.[0-9]+$' \
+		| tail -1 \
+	)" \
+	&& git checkout "${PLUGIN_VERSION}" \
+	&& echo -n "${PLUGIN_VERSION}" > VERSION \
+	&& make clean checkstyle release-test pre-release build-linux-amd64 build-arm64 prepack-linux-amd64 prepack-linux-arm64 \
+	&& mv bin/linux_${ARCH}_plugin/session-manager-plugin /usr/bin/session-manager-plugin \
+	&& chmod +x /usr/bin/session-manager-plugin \
+	&& /usr/bin/session-manager-plugin --version | grep -E "${PLUGIN_VERSION}"
+
+
+# --------------------------------------------------------------------------------------------------
+# Final Image
+# --------------------------------------------------------------------------------------------------
+FROM cytopia/ansible:${VERSION}-aws as production
+ARG VERSION
+# https://github.com/opencontainers/image-spec/blob/master/annotations.md
+#LABEL "org.opencontainers.image.created"=""
+#LABEL "org.opencontainers.image.version"=""
+#LABEL "org.opencontainers.image.revision"=""
+LABEL "maintainer"="cytopia <cytopia@everythingcli.org>"
+LABEL "org.opencontainers.image.authors"="cytopia <cytopia@everythingcli.org>"
+LABEL "org.opencontainers.image.vendor"="cytopia"
+LABEL "org.opencontainers.image.licenses"="MIT"
+LABEL "org.opencontainers.image.url"="https://github.com/cytopia/docker-ansible"
+LABEL "org.opencontainers.image.documentation"="https://github.com/cytopia/docker-ansible"
+LABEL "org.opencontainers.image.source"="https://github.com/cytopia/docker-ansible"
+LABEL "org.opencontainers.image.ref.name"="Ansible ${VERSION} awssessionmanager"
+LABEL "org.opencontainers.image.title"="Ansible ${VERSION} awssessionmanager"
+LABEL "org.opencontainers.image.description"="Ansible ${VERSION} awssessionmanager"
+
+COPY --from=builder /usr/bin/session-manager-plugin /usr/bin/session-manager-plugin
+
+WORKDIR /data
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["/bin/bash"]
